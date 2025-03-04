@@ -1,23 +1,33 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) B.Kerler 2018-2021
-import io
-import logging
-
-import usb.core  # pyusb
-import usb.util
-import time
-import inspect
+# (c) B.Kerler 2018-2024 under GPLv3 license
+# If you use my code, make sure you refer to my name
+#
+# !!!!! If you use this code in commercial products, your product is automatically
+# GPLv3 and has to be open sourced under GPLv3 as well. !!!!!
 import array
-import usb.backend.libusb0
-import usb.backend.libusb1
-from enum import Enum
+import inspect
+import logging
 from binascii import hexlify
 from ctypes import c_void_p, c_int
-from edlclient.Library.utils import *
-from struct import pack, calcsize
-import traceback
-from edlclient.Library.Connection.devicehandler import DeviceClass
+from enum import Enum
+
+import usb.backend.libusb0
+import usb.core  # pyusb
+import usb.util
+
+try:
+    from edlclient.Library.utils import *
+except:
+    from Library.utils import *
+if not is_windows():
+    import usb.backend.libusb1
+from struct import pack
+
+try:
+    from edlclient.Library.Connection.devicehandler import DeviceClass
+except:
+    from Library.Connection.devicehandler import DeviceClass
 USB_DIR_OUT = 0  # to device
 USB_DIR_IN = 0x80  # to host
 
@@ -38,6 +48,8 @@ USB_RECIP_OTHER = 0x03
 USB_RECIP_PORT = 0x04
 USB_RECIP_RPIPE = 0x05
 
+MAX_USB_BULK_BUFFER_SIZE = 16384
+
 tag = 0
 
 CDC_CMDS = {
@@ -55,19 +67,18 @@ CDC_CMDS = {
 
 class usb_class(DeviceClass):
 
-    def __init__(self, loglevel=logging.INFO, portconfig=None, devclass=-1):
+    def __init__(self, loglevel=logging.INFO, portconfig=None, devclass=-1, serial_number=None):
         super().__init__(loglevel, portconfig, devclass)
+        self.serial_number = serial_number
         self.load_windows_dll()
         self.EP_IN = None
         self.EP_OUT = None
         self.is_serial = False
+        self.buffer = array.array('B', [0]) * 1048576
         if sys.platform.startswith('freebsd') or sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
             self.backend = usb.backend.libusb1.get_backend(find_library=lambda x: "libusb-1.0.so")
-        elif sys.platform.startswith('win32'):
-            if calcsize("P") * 8 == 64:
-                self.backend = usb.backend.libusb1.get_backend(find_library=lambda x: "libusb-1.0.dll")
-            else:
-                self.backend = usb.backend.libusb1.get_backend(find_library=lambda x: "libusb32-1.0.dll")
+        elif is_windows():
+            self.backend = None
         if self.backend is not None:
             try:
                 self.backend.lib.libusb_set_option.argtypes = [c_void_p, c_int]
@@ -199,7 +210,7 @@ class usb_class(DeviceClass):
     def flush(self):
         return
 
-    def connect(self, EP_IN=-1, EP_OUT=-1, portname:str=""):
+    def connect(self, EP_IN=-1, EP_OUT=-1, portname: str = ""):
         if self.connected:
             self.close()
             self.connected = False
@@ -210,9 +221,13 @@ class usb_class(DeviceClass):
         for dev in devices:
             for usbid in self.portconfig:
                 if dev.idProduct == usbid[1] and dev.idVendor == usbid[0]:
+                    if self.serial_number is not None:
+                        if dev.serial_number != self.serial_number:
+                            continue
                     self.device = dev
                     self.vid = dev.idVendor
                     self.pid = dev.idProduct
+                    self.serial_number = dev.serial_number
                     self.interface = usbid[2]
                     break
             if self.device is not None:
@@ -255,6 +270,18 @@ class usb_class(DeviceClass):
 
         if self.EP_OUT is not None and self.EP_IN is not None:
             self.maxsize = self.EP_IN.wMaxPacketSize
+            try:
+                if self.device.is_kernel_driver_active(0):
+                    self.debug("Detaching kernel driver")
+                    self.device.detach_kernel_driver(0)
+            except Exception as err:
+                self.debug("No kernel driver supported: " + str(err))
+
+            try:
+                usb.util.claim_interface(self.device, 0)
+            except:
+                pass
+            """
             self.debug(self.configuration)
             if self.interface != 0:
                 try:
@@ -284,6 +311,7 @@ class usb_class(DeviceClass):
                         usb.util.claim_interface(self.device, self.interface)
                 except:
                     pass
+            """
             self.connected = True
             return True
         print("Couldn't find CDC interface. Aborting.")
@@ -309,7 +337,8 @@ class usb_class(DeviceClass):
 
     def write(self, command, pktsize=None):
         if pktsize is None:
-            pktsize = self.EP_OUT.wMaxPacketSize
+            # pktsize = self.EP_OUT.wMaxPacketSize
+            pktsize = MAX_USB_BULK_BUFFER_SIZE
         if isinstance(command, str):
             command = bytes(command, 'utf-8')
         pos = 0
@@ -354,11 +383,13 @@ class usb_class(DeviceClass):
             self.info("Warning !")
         res = bytearray()
         loglevel = self.loglevel
+        buffer = self.buffer[:resplen]
         epr = self.EP_IN.read
         extend = res.extend
         while len(res) < resplen:
             try:
-                extend(epr(resplen, timeout))
+                resplen = epr(buffer, timeout)
+                extend(buffer[:resplen])
                 if resplen == self.EP_IN.wMaxPacketSize:
                     break
             except usb.core.USBError as e:

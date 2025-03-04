@@ -1,18 +1,25 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) B.Kerler 2018-2022
-import binascii
-import time
+# (c) B.Kerler 2018-2024 under GPLv3 license
+# If you use my code, make sure you refer to my name
+#
+# !!!!! If you use this code in commercial products, your product is automatically
+# GPLv3 and has to be open sourced under GPLv3 as well. !!!!!
+import inspect
+import logging
 import os
 import sys
-import logging
-import inspect
-from struct import unpack, pack
+
 current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
-from edlclient.Library.utils import read_object, print_progress, rmrf, LogBase
-from edlclient.Config.qualcomm_config import sochw, msmids, root_cert_hash
+try:
+    from edlclient.Library.utils import read_object, print_progress, rmrf, LogBase
+    from edlclient.Config.qualcomm_config import sochw, msmids, root_cert_hash
+except:
+    from Library.utils import read_object, print_progress, rmrf, LogBase
+    from Config.qualcomm_config import sochw, msmids, root_cert_hash
+
 
 class loader_utils(metaclass=LogBase):
     def __init__(self, loglevel=logging.INFO):
@@ -30,7 +37,7 @@ class loader_utils(metaclass=LogBase):
         self.loaderdb = {}
 
     def init_loader_db(self):
-        for (dirpath, dirnames, filenames) in os.walk(os.path.join(parent_dir,"..","Loaders")):
+        for (dirpath, dirnames, filenames) in os.walk(os.path.join(parent_dir, "..", "Loaders")):
             for filename in filenames:
                 fn = os.path.join(dirpath, filename)
                 found = False
@@ -43,7 +50,15 @@ class loader_utils(metaclass=LogBase):
                 try:
                     hwid = filename.split("_")[0].lower()
                     msmid = hwid[:8]
+                    try:
+                        int(msmid, 16)
+                    except:
+                        continue
                     devid = hwid[8:]
+                    if devid == '':
+                        continue
+                    if len(filename.split("_")) < 2:
+                        continue
                     pkhash = filename.split("_")[1].lower()
                     for msmid in self.convertmsmid(msmid):
                         mhwid = msmid + devid
@@ -52,10 +67,8 @@ class loader_utils(metaclass=LogBase):
                             self.loaderdb[mhwid] = {}
                         if pkhash not in self.loaderdb[mhwid]:
                             self.loaderdb[mhwid][pkhash] = fn
-                        else:
-                            self.loaderdb[mhwid][pkhash].append(fn)
                 except Exception as e:  # pylint: disable=broad-except
-                    self.debug(str(e))
+                    self.debug(f"Filename:{filename} => {str(e)}")
                     continue
         return self.loaderdb
 
@@ -74,4 +87,3 @@ class loader_utils(metaclass=LogBase):
                             rmsmid = '0' + rmsmid
                         msmiddb.append(rmsmid)
         return msmiddb
-

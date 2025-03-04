@@ -1,11 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# (c) B.Kerler 2018-2024 under GPLv3 license
+# If you use my code, make sure you refer to my name
+#
+# !!!!! If you use this code in commercial products, your product is automatically
+# GPLv3 and has to be open sourced under GPLv3 as well. !!!!!
+
 from edlclient.Library.utils import structhelper_io
 from io import BytesIO
 
 SAHARA_VERSION = 2
 SAHARA_MIN_VERSION = 1
 
+
 class DataError(Exception):
     pass
+
 
 class cmd_t:
     SAHARA_HELLO_REQ = 0x1
@@ -28,26 +38,28 @@ class cmd_t:
     SAHARA_64BIT_MEMORY_READ_DATA = 0x12
     SAHARA_RESET_STATE_MACHINE_ID = 0x13
 
+
 class cmd_t_version:
     SAHARA_HELLO_REQ = 0x1
-    SAHARA_HELLO_RSP = 1.0
-    SAHARA_READ_DATA = 1.0
-    SAHARA_END_TRANSFER = 1.0
-    SAHARA_DONE_REQ = 1.0
-    SAHARA_DONE_RSP = 1.0
-    SAHARA_RESET_REQ = 1.0
-    SAHARA_RESET_RSP = 1.0
-    SAHARA_MEMORY_DEBUG = 2.0
-    SAHARA_MEMORY_READ = 2.0
-    SAHARA_CMD_READY = 2.1
-    SAHARA_SWITCH_MODE = 2.1
-    SAHARA_EXECUTE_REQ = 2.1
-    SAHARA_EXECUTE_RSP = 2.1
-    SAHARA_EXECUTE_DATA = 2.1
-    SAHARA_64BIT_MEMORY_DEBUG = 2.5
-    SAHARA_64BIT_MEMORY_READ = 2.5
-    SAHARA_64BIT_MEMORY_READ_DATA = 2.8
-    SAHARA_RESET_STATE_MACHINE_ID = 2.9
+    SAHARA_HELLO_RSP = 1
+    SAHARA_READ_DATA = 1
+    SAHARA_END_TRANSFER = 1
+    SAHARA_DONE_REQ = 1
+    SAHARA_DONE_RSP = 1
+    SAHARA_RESET_REQ = 1
+    SAHARA_RESET_RSP = 1
+    SAHARA_MEMORY_DEBUG = 2
+    SAHARA_MEMORY_READ = 2
+    SAHARA_CMD_READY = 2
+    SAHARA_SWITCH_MODE = 2
+    SAHARA_EXECUTE_REQ = 2
+    SAHARA_EXECUTE_RSP = 2
+    SAHARA_EXECUTE_DATA = 2
+    SAHARA_64BIT_MEMORY_DEBUG = 2
+    SAHARA_64BIT_MEMORY_READ = 2
+    SAHARA_64BIT_MEMORY_READ_DATA = 2
+    SAHARA_RESET_STATE_MACHINE_ID = 2
+
 
 class exec_cmd_t:
     SAHARA_EXEC_CMD_NOP = 0x00
@@ -58,6 +70,8 @@ class exec_cmd_t:
     SAHARA_EXEC_CMD_SWITCH_TO_STREAM_DLOAD = 0x05
     SAHARA_EXEC_CMD_READ_DEBUG_DATA = 0x06
     SAHARA_EXEC_CMD_GET_SOFTWARE_VERSION_SBL = 0x07
+    SAHARA_EXEC_CMD_GET_COMMAND_ID_LIST = 0x08
+    SAHARA_EXEC_CMD_GET_TRAINING_DATA = 0x09
 
 
 class sahara_mode_t:
@@ -160,7 +174,7 @@ ErrorDesc = {
 class CommandHandler:
 
     def pkt_hello_req(self, data):
-        if len(data)<0xC * 0x4:
+        if len(data) < 0xC * 0x4:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
@@ -168,8 +182,8 @@ class CommandHandler:
             cmd = st.dword()
             len = st.dword()
             version = st.dword()
-            version_min = st.dword()
-            max_cmd_len = st.dword()
+            version_supported = st.dword()
+            cmd_packet_length = st.dword()
             mode = st.dword()
             reserved1 = st.dword()
             reserved2 = st.dword()
@@ -181,7 +195,7 @@ class CommandHandler:
         return req
 
     def pkt_cmd_hdr(self, data):
-        if len(data)<2*4:
+        if len(data) < 2 * 4:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
@@ -192,35 +206,35 @@ class CommandHandler:
         return req
 
     def pkt_read_data(self, data):
-        if len(data)<0x5 * 0x4:
+        if len(data) < 0x5 * 0x4:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
         class req:
             cmd = st.dword()
             len = st.dword()
-            id = st.dword()
+            image_id = st.dword()
             data_offset = st.dword()
             data_len = st.dword()
 
         return req
 
     def pkt_read_data_64(self, data):
-        if len(data)<0x8 + 0x3 * 0x8:
+        if len(data) < 0x8 + 0x3 * 0x8:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
         class req:
             cmd = st.dword()
             len = st.dword()
-            id = st.qword()
+            image_id = st.qword()
             data_offset = st.qword()
             data_len = st.qword()
 
         return req
 
     def pkt_memory_debug(self, data):
-        if len(data)<0x8 + 0x2 * 0x4:
+        if len(data) < 0x8 + 0x2 * 0x4:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
@@ -233,7 +247,7 @@ class CommandHandler:
         return req
 
     def pkt_memory_debug_64(self, data):
-        if len(data)<0x8 + 0x2 * 0x8:
+        if len(data) < 0x8 + 0x2 * 0x8:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
@@ -246,7 +260,7 @@ class CommandHandler:
         return req
 
     def pkt_execute_rsp_cmd(self, data):
-        if len(data)<0x4 * 0x4:
+        if len(data) < 0x4 * 0x4:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
@@ -259,32 +273,32 @@ class CommandHandler:
         return req
 
     def pkt_image_end(self, data):
-        if len(data)<0x4 * 0x4:
+        if len(data) < 0x4 * 0x4:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
         class req:
             cmd = st.dword()
             len = st.dword()
-            id = st.dword()
-            status = st.dword()
+            image_id = st.dword()
+            image_tx_status = st.dword()
 
         return req
 
     def pkt_done(self, data):
-        if len(data)<0x3 * 4:
+        if len(data) < 0x3 * 4:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
         class req:
             cmd = st.dword()
             len = st.dword()
-            status = st.dword()
+            image_tx_status = st.dword()
 
         return req
 
     def pkt_info(self, data):
-        if len(data)<0x3 * 4 + 0x20:
+        if len(data) < 0x3 * 4 + 0x20:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
@@ -297,7 +311,7 @@ class CommandHandler:
         return req
 
     def parttbl(self, data):
-        if len(data)<(0x3 * 4) + 20 + 20:
+        if len(data) < (0x3 * 4) + 20 + 20:
             raise DataError
         st = structhelper_io(BytesIO(data))
 
@@ -311,7 +325,7 @@ class CommandHandler:
         return req
 
     def parttbl_64bit(self, data):
-        if len(data)<(0x3 * 8) + 20 + 20:
+        if len(data) < (0x3 * 8) + 20 + 20:
             raise DataError
         st = structhelper_io(BytesIO(data))
 

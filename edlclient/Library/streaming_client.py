@@ -1,6 +1,10 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) B.Kerler 2018-2021
+# (c) B.Kerler 2018-2024 under GPLv3 license
+# If you use my code, make sure you refer to my name
+#
+# !!!!! If you use this code in commercial products, your product is automatically
+# GPLv3 and has to be open sourced under GPLv3 as well. !!!!!
 import sys
 import os
 import logging
@@ -50,7 +54,7 @@ class streaming_client(metaclass=LogBase):
         self.printer("-------------------------------------------------------------")
         for name in partitions:
             partition = partitions[name]
-            if not isinstance(partition,dict):
+            if not isinstance(partition, dict):
                 continue
             for i in range(0x10 - len(name)):
                 name += " "
@@ -132,7 +136,7 @@ class streaming_client(metaclass=LogBase):
             elif cmd == "rf":
                 sector = 0
                 sectors = self.streaming.settings.MAXBLOCK * self.streaming.settings.num_pages_per_blk * \
-                    self.streaming.settings.sectors_per_page
+                          self.streaming.settings.sectors_per_page
                 filename = options["<filename>"]
                 self.printer(f"Dumping Flash from sector 0 to sector {hex(sectors)}...")
                 if self.streaming.read_sectors(sector, sectors, filename, True):
@@ -319,7 +323,7 @@ class streaming_client(metaclass=LogBase):
                             self.error(f"Error: Couldn't find partition file: {partitionfilename}")
                             return False
                         else:
-                            ptable = open(partitionfilename,"rb").read()
+                            ptable = open(partitionfilename, "rb").read()
                 else:
                     self.error("Partition file is needed for writing (--partitionfilename)")
                     sys.exit(1)

@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# (c) B.Kerler 2018-2024 under GPLv3 license
+# If you use my code, make sure you refer to my name
+#
+# !!!!! If you use this code in commercial products, your product is automatically
+# GPLv3 and has to be open sourced under GPLv3 as well. !!!!!
+import hashlib
+import inspect
 import os
 import sys
+from io import BytesIO
 from os import walk
-import hashlib
-from struct import unpack, pack
 from shutil import copyfile
-import os, sys, inspect
-current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
-from edlclient.Library.utils import elf
-from edlclient.Library.loader_db import loader_utils
-from edlclient.Config.qualcomm_config import vendor
+from struct import unpack
+try:
+    from Config.qualcomm_config import vendor
+    from Library.loader_db import loader_utils
+    from Library.utils import elf
+except ModuleNotFoundError:
+    from edlclient.Config.qualcomm_config import vendor
+    from edlclient.Library.loader_db import loader_utils
+    from edlclient.Library.utils import elf
 
-lu=loader_utils()
+current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+
+lu = loader_utils()
+
 
 class MBN:
     def __init__(self, memory):
         self.imageid, self.flashpartitionversion, self.imagesrc, self.loadaddr, self.imagesz, self.codesz, \
-        self.sigptr, self.sigsz, self.certptr, self.certsz = unpack("<IIIIIIIIII", memory[0xC:0xC + 40])
+            self.sigptr, self.sigsz, self.certptr, self.certsz = unpack("<IIIIIIIIII", memory[0xC:0xC + 40])
 
 
 class Signed:
@@ -50,7 +62,7 @@ def grabtext(data):
     return text
 
 
-def extract_hdr(memsection, sign_info, mem_section, code_size, signature_size):
+def extract_hdr(memsection, version, sign_info, mem_section, code_size, signature_size, hdr1, hdr2, hdr3, hdr4):
     try:
         md_size = \
             unpack("<I", mem_section[memsection.file_start_addr + 0x2C:memsection.file_start_addr + 0x2C + 0x4])[0]
@@ -85,7 +97,10 @@ def extract_hdr(memsection, sign_info, mem_section, code_size, signature_size):
         anti_rollback_version=unpack("<I", mm[md_offset:md_offset + 4])[0]
         '''
 
-        signatureoffset = memsection.file_start_addr + 0x30 + md_size + code_size + signature_size
+        if version == 6:
+            signatureoffset = memsection.file_start_addr + 0x30 + md_size + code_size + signature_size
+        elif version == 7:
+            signatureoffset = memsection.file_start_addr + 0x28 + hdr1 + hdr2 + hdr3 + md_size + code_size + hdr4
         try:
             if mem_section[signatureoffset] != 0x30:
                 print("Error on " + sign_info.filename + ", unknown signaturelength")
@@ -98,9 +113,55 @@ def extract_hdr(memsection, sign_info, mem_section, code_size, signature_size):
         len1 = unpack(">H", mem_section[signatureoffset + 2:signatureoffset + 4])[0] + 4
         casignature2offset = signatureoffset + len1
         len2 = unpack(">H", mem_section[casignature2offset + 2:casignature2offset + 4])[0] + 4
-        rootsignature3offset = casignature2offset + len2
-        len3 = unpack(">H", mem_section[rootsignature3offset + 2:rootsignature3offset + 4])[0] + 4
-        sign_info.pk_hash = hashlib.sha384(mem_section[rootsignature3offset:rootsignature3offset + len3]).hexdigest()
+        rootsignature3 = mem_section[(casignature2offset + len2):(casignature2offset + len2) + 999999999].split(
+            b'\xff\xff\xff\xff\xff\xff\xff\xff\xff')[0]
+
+        idx = signatureoffset
+        signature = {}
+        while idx != -1:
+            if idx >= len(mem_section):
+                break
+            idx = mem_section.find('\x04\x0B'.encode(), idx)
+            if idx == -1:
+                break
+            length = mem_section[idx + 3]
+            if length > 60:
+                idx += 1
+                continue
+            try:
+                text = mem_section[idx + 4:idx + 4 + length].decode().split(' ')
+                signature[text[2]] = text[1]
+            except:
+                text = ""
+            idx += 1
+        idx = mem_section.find('QC_IMAGE_VERSION_STRING='.encode(), 0)
+        if idx != -1:
+            sign_info.qc_version = grabtext(mem_section[idx + len("QC_IMAGE_VERSION_STRING="):])
+        idx = mem_section.find('OEM_IMAGE_VERSION_STRING='.encode(), 0)
+        if idx != -1:
+            sign_info.oem_version = grabtext(mem_section[idx + len("OEM_IMAGE_VERSION_STRING="):])
+        idx = mem_section.find('IMAGE_VARIANT_STRING='.encode(), 0)
+        if idx != -1:
+            sign_info.image_variant = grabtext(mem_section[idx + len("IMAGE_VARIANT_STRING="):])
+        if "MODEL_ID" in signature:
+            sign_info.model_id = signature["MODEL_ID"]
+        if "OEM_ID" in signature:
+            sign_info.oem_id = signature["OEM_ID"]
+        if "HW_ID" in signature:
+            sign_info.hw_id = signature["HW_ID"]
+        if "SW_ID" in signature:
+            sign_info.sw_id = signature["SW_ID"]
+        if "SW_SIZE" in signature:
+            sign_info.sw_size = signature["SW_SIZE"]
+        if "SHA256" in signature:
+            sign_info.pk_hash = hashlib.sha256(rootsignature3).hexdigest()
+        elif "SHA384" in signature:
+            sign_info.pk_hash = hashlib.sha384(
+                rootsignature3).hexdigest()
+        else:
+            sign_info.pk_hash = hashlib.sha384(
+                rootsignature3).hexdigest()
+
     except:
         return None
     return sign_info
@@ -118,9 +179,9 @@ def extract_old_hdr(signatureoffset, sign_info, mem_section, code_size, signatur
         len1 = unpack(">H", mem_section[signatureoffset + 2:signatureoffset + 4])[0] + 4
         casignature2offset = signatureoffset + len1
         len2 = unpack(">H", mem_section[casignature2offset + 2:casignature2offset + 4])[0] + 4
-        rootsignature3offset = casignature2offset + len2
-        len3 = unpack(">H", mem_section[rootsignature3offset + 2:rootsignature3offset + 4])[0] + 4
-        sign_info.pk_hash = hashlib.sha256(mem_section[rootsignature3offset:rootsignature3offset + len3]).hexdigest()
+        rootsignature3 = mem_section[(casignature2offset + len2):(casignature2offset + len2) + 999999999].split(
+            b'\xff\xff\xff\xff\xff\xff\xff\xff\xff')[0]
+        sign_info.pk_hash = hashlib.sha256(rootsignature3).hexdigest()
         idx = signatureoffset
 
         while idx != -1:
@@ -158,12 +219,24 @@ def extract_old_hdr(signatureoffset, sign_info, mem_section, code_size, signatur
             sign_info.sw_id = signature["SW_ID"]
         if "SW_SIZE" in signature:
             sign_info.sw_size = signature["SW_SIZE"]
+        if "SHA256" in signature:
+            sign_info.pk_hash = hashlib.sha256(rootsignature3).hexdigest()
+        elif "SHA384" in signature:
+            sign_info.pk_hash = hashlib.sha384(
+                rootsignature3).hexdigest()
     return sign_info
 
 
 def init_loader_db():
     loaderdb = {}
-    for (dirpath, dirnames, filenames) in os.walk(os.path.join(current_dir,"..","..","Loaders")):
+    loaders = os.path.join(current_dir, "..", "..", "Loaders")
+    if not os.path.exists(loaders):
+        loaders = os.path.join(current_dir, "Loaders")
+        if not os.path.exists(loaders):
+            print("Couldn't find Loaders directory")
+            return loaderdb
+
+    for (dirpath, dirnames, filenames) in os.walk(loaders):
         for filename in filenames:
             file_name = os.path.join(dirpath, filename)
             found = False
@@ -216,11 +289,11 @@ def main(argv):
     if len(argv) < 3:
         print("Usage: fhloaderparse [FHLoaderDir] [OutputDir]")
         exit(0)
-    else:
-        path = argv[1]
-        outputdir = argv[2]
-        if not os.path.exists(outputdir):
-            os.mkdir(outputdir)
+
+    path = argv[1]
+    outputdir = argv[2]
+    if not os.path.exists(outputdir):
+        os.mkdir(outputdir)
 
     # First hash all loaders in Loader directory
     hashes = {}
@@ -262,42 +335,52 @@ def main(argv):
     filelist = []
     rt = open(os.path.join(outputdir, argv[1] + ".log"), "w")
     for filename in file_list:
+        filesize = os.stat(filename).st_size
+        elfpos = 0
         with open(filename, 'rb') as rhandle:
-            mem_section = rhandle.read()
-            sha256 = hashlib.sha256()
-            sha256.update(mem_section)
-
+            data = rhandle.read()
+            if len(data) < 4:
+                continue
             signinfo = Signed()
+            sha256 = hashlib.sha256()
+            sha256.update(data)
             signinfo.hash = sha256.digest()
             signinfo.filename = filename
             signinfo.filesize = os.stat(filename).st_size
-            if len(mem_section) < 4:
-                continue
-            hdr = unpack("<I", mem_section[0:4])[0]
 
-            if hdr&0xFFFFFF == 0x4C457F:
+            while elfpos < filesize:
+                if elfpos == -1:
+                    break
+                mem_section = data[elfpos:]
                 elfheader = elf(mem_section, signinfo.filename)
+                if len(elfheader.pentry) < 4:
+                    elfpos = data.find(b"\x7FELF", elfpos + 1)
+                    continue
+                idx = 0
+                for entry in elfheader.pentry:
+                    if entry.p_type == 0 and entry.p_flags & 0xF000000 == 0x2000000:
+                        break
+                    idx += 1
                 if 'memorylayout' in dir(elfheader):
-                    memsection = elfheader.memorylayout[1]
+                    memsection = elfheader.memorylayout[idx]
                     try:
-                        version = unpack("<I", mem_section[
-                                               memsection.file_start_addr + 0x04:memsection.file_start_addr + 0x04 + 0x4])[
-                            0]
-                        code_size = \
-                            unpack("<I", mem_section[
-                                         memsection.file_start_addr + 0x14:memsection.file_start_addr + 0x14 + 0x4])[
-                                0]
-                        signature_size = \
-                            unpack("<I", mem_section[
-                                         memsection.file_start_addr + 0x1C:memsection.file_start_addr + 0x1C + 0x4])[
-                                0]
+                        sect = BytesIO(mem_section[memsection.file_start_addr + 0x4:])
+                        version = int.from_bytes(sect.read(4), 'little')
+                        hdr1 = int.from_bytes(sect.read(4), 'little')
+                        hdr2 = int.from_bytes(sect.read(4), 'little')
+                        hdr3 = int.from_bytes(sect.read(4), 'little')
+                        code_size = int.from_bytes(sect.read(4), 'little')
+                        hdr4 = int.from_bytes(sect.read(4), 'little')
+                        signature_size = int.from_bytes(sect.read(4), 'little')
                         # cert_chain_size=unpack("<I", mem_section[memsection.file_start_addr + 0x24:memsection.file_start_addr + 0x24 + 0x4])[0]
-                    except:
+                    except Exception as err:
+                        print(err)
                         continue
                     if signature_size == 0:
                         print("%s has no signature." % filename)
                         copyfile(filename,
                                  os.path.join(outputdir, "Unknown", filename[filename.rfind("/") + 1:].lower()))
+                        elfpos += 0x30
                         continue
                     if version < 6:  # MSM,MDM
                         signatureoffset = memsection.file_start_addr + 0x28 + code_size + signature_size
@@ -305,15 +388,19 @@ def main(argv):
                         if signinfo is None:
                             continue
                         filelist.append(signinfo)
+                        break
                     elif version >= 6:  # SDM
-                        signinfo = extract_hdr(memsection, signinfo, mem_section, code_size, signature_size)
+                        signinfo = extract_hdr(memsection, version, signinfo, mem_section, code_size, signature_size,
+                                               hdr1,
+                                               hdr2, hdr3, hdr4)
                         if signinfo is None:
                             continue
                         filelist.append(signinfo)
+                        break
                     else:
                         print("Unknown version for " + filename)
                         continue
-            elif hdr == 0x844BDCD1:
+            if elfpos == -1 and int.from_bytes(data[:4], 'little') == 0x844BDCD1:
                 mbn = MBN(mem_section)
                 if mbn.sigsz == 0:
                     print("%s has no signature." % filename)
@@ -324,7 +411,7 @@ def main(argv):
                 if signinfo is None:
                     continue
                 filelist.append(signinfo)
-            else:
+            elif elfpos == -1:
                 print("Error on " + filename)
                 continue
 
@@ -337,13 +424,13 @@ def main(argv):
     loaderlists = {}
     for item in sorted_x:
         if item.oem_id != '':
-            oemid=int(item.oem_id,16)
+            oemid = int(item.oem_id, 16)
             if oemid in vendor:
                 oeminfo = vendor[oemid]
             else:
-                oeminfo=item.oem_id
-            if len(item.sw_id)<16:
-                item.sw_id="0"*(16-len(item.sw_id))+item.sw_id
+                oeminfo = item.oem_id
+            if len(item.sw_id) < 16:
+                item.sw_id = "0" * (16 - len(item.sw_id)) + item.sw_id
             info = f"OEM:{oeminfo}\tMODEL:{item.model_id}\tHWID:{item.hw_id}\tSWID:{item.sw_id}\tSWSIZE:{item.sw_size}\tPK_HASH:{item.pk_hash}\t{item.filename}\t{str(item.filesize)}"
             if item.oem_version != '':
                 info += "\tOEMVER:" + item.oem_version + "\tQCVER:" + item.qc_version + "\tVAR:" + item.image_variant
@@ -367,11 +454,11 @@ def main(argv):
                                 if b"peek\x00" in data:
                                     auth += "_peek"
                             fna = os.path.join(outputdir, (
-                                        hwid + "_" + loader_info.pk_hash[0:16] + "_FHPRG" + auth + ".bin").lower())
+                                    hwid + "_" + loader_info.pk_hash[0:16] + "_FHPRG" + auth + ".bin").lower())
                             if not os.path.exists(fna):
                                 copyfile(item.filename,
                                          os.path.join(outputdir, hwid + "_" + (
-                                                     loader_info.pk_hash[0:16] + "_FHPRG" + auth + ".bin").lower()))
+                                                 loader_info.pk_hash[0:16] + "_FHPRG" + auth + ".bin").lower()))
                             elif item.filesize > os.stat(fna).st_size:
                                 copyfile(item.filename, os.path.join(outputdir,
                                                                      (hwid + "_" + loader_info.pk_hash[
@@ -387,13 +474,13 @@ def main(argv):
                 copyfile(item.filename,
                          os.path.join(outputdir, "Duplicate",
                                       (loader_info.hw_id + "_" + loader_info.pk_hash[0:16] + "_FHPRG.bin").lower()))
-                print(item.filename + " does already exist. Skipping")
+                print(item.filename + f" is duplicate of {hashes[item.hash]}. Skipping")
             try:
                 rt.write(info + "\n")
             except:
                 continue
         else:
-            print("Unknown :"+item.filename)
+            print("Unknown :" + item.filename)
             copyfile(item.filename, os.path.join(outputdir, "Unknown", os.path.basename(item.filename).lower()))
 
     for item in filelist:

@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) B.Kerler 2020-2021 under MIT license
+# (c) B.Kerler 2018-2024 under GPLv3 license
 # If you use my code, make sure you refer to my name
-# If you want to use in a commercial product, ask me before integrating it
+#
+# !!!!! If you use this code in commercial products, your product is automatically
+# GPLv3 and has to be open sourced under GPLv3 as well. !!!!!
+import argparse
+import hashlib
 import time
-from telnetlib import Telnet
+
+import requests
 import serial
 import serial.tools.list_ports
-import argparse
-import requests
-import hashlib
+from Exscript.protocols.telnetlib import Telnet
 
 try:
     from edlclient.Tools.qc_diag import qcdiag
@@ -18,7 +21,8 @@ except ImportError as e:
 
 import usb.core
 from enum import Enum
-import crypt
+
+from passlib.hash import md5_crypt
 
 try:
     from edlclient.Tools.sierrakeygen import SierraKeygen
@@ -30,15 +34,86 @@ except ImportError:
     sys.path.insert(0, parent_dir)
     from sierrakeygen import SierraKeygen
 
-try:
-    from edlclient.Library.utils import LogBase
-except Exception as e:
-    import os, sys, inspect
+import logging
+import logging.config
+import logging.handlers
+import colorama
 
-    current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
-    parent_dir = os.path.dirname(current_dir)
-    sys.path.insert(0, parent_dir)
-    from edlclient.Library.utils import LogBase
+itoa64 = bytearray(b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+
+
+def _crypt_to64(s, v, n):
+    out = bytearray()
+    while --n >= 0:
+        out.append(itoa64[v & 0x3f])
+        v >>= 6
+
+
+class ColorFormatter(logging.Formatter):
+    LOG_COLORS = {
+        logging.ERROR: colorama.Fore.RED,
+        logging.DEBUG: colorama.Fore.LIGHTMAGENTA_EX,
+        logging.WARNING: colorama.Fore.YELLOW,
+    }
+
+    def format(self, record, *args, **kwargs):
+        # if the corresponding logger has children, they may receive modified
+        # record, so we want to keep it intact
+        new_record = copy.copy(record)
+        if new_record.levelno in self.LOG_COLORS:
+            pad = ""
+            if new_record.name != "root":
+                print(new_record.name)
+                pad = "[LIB]: "
+            # we want levelname to be in different color, so let's modify it
+            new_record.msg = "{pad}{color_begin}{msg}{color_end}".format(
+                pad=pad,
+                msg=new_record.msg,
+                color_begin=self.LOG_COLORS[new_record.levelno],
+                color_end=colorama.Style.RESET_ALL,
+            )
+        # now we can let standart formatting take care of the rest
+        return super(ColorFormatter, self).format(new_record, *args, **kwargs)
+
+
+class LogBase(type):
+    debuglevel = logging.root.level
+
+    def __init__(cls, *args):
+        super().__init__(*args)
+        logger_attribute_name = '_' + cls.__name__ + '__logger'
+        logger_debuglevel_name = '_' + cls.__name__ + '__debuglevel'
+        logger_name = '.'.join([c.__name__ for c in cls.mro()[-2::-1]])
+        LOG_CONFIG = {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "root": {
+                    "()": ColorFormatter,
+                    "format": "%(name)s - %(message)s",
+                }
+            },
+            "handlers": {
+                "root": {
+                    # "level": cls.__logger.level,
+                    "formatter": "root",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout",
+                }
+            },
+            "loggers": {
+                "": {
+                    "handlers": ["root"],
+                    # "level": cls.debuglevel,
+                    "propagate": False
+                }
+            },
+        }
+        logging.config.dictConfig(LOG_CONFIG)
+        logger = logging.getLogger(logger_name)
+
+        setattr(cls, logger_attribute_name, logger)
+        setattr(cls, logger_debuglevel_name, cls.debuglevel)
 
 
 class vendor(Enum):
@@ -110,24 +185,37 @@ class connection:
             0x04E8: ["Samsung", -1]
         }
         mode = "Unknown"
-        for device in self.detectusbdevices():
-            if device.vid == vendor.zte.value:
-                if device.pid == 0x0016:
-                    print(f"Detected a {atvendortable[device.vid][0]} device with pid {hex(device.pid)} in AT mode")
-                    mode = "AT"
-                    break
-                elif device.pid == 0x1403:
-                    print(f"Detected a {atvendortable[device.vid][0]} device with pid {hex(device.pid)} in Web mode")
-                    mode = "Web"
-                    self.ZTE_Web()
-                    break
-            elif device.vid == vendor.netgear.value:
-                try:
-                    # vid 0846, netgear mr1100, mr5100
-                    self.tn = Telnet("192.168.1.1", 5510, 5)
-                    self.connected = True
-                except:
-                    self.connected = False
+        try:
+            for device in self.detectusbdevices():
+                if device.vid == vendor.zte.value:
+                    if device.pid == 0x0016:
+                        print(f"Detected a {atvendortable[device.vid][0]} device with pid {hex(device.pid)} in AT mode")
+                        mode = "AT"
+                        break
+                    elif device.pid == 0x1403:
+                        print(
+                            f"Detected a {atvendortable[device.vid][0]} device with pid {hex(device.pid)} in Web mode")
+                        mode = "Web"
+                        self.ZTE_Web()
+                        break
+                elif device.vid == vendor.netgear.value:
+                    try:
+                        # vid 0846, netgear mr1100, mr5100
+                        self.tn = Telnet("192.168.1.1", 5510)
+                        self.connected = True
+                    except:
+                        self.connected = False
+        except:
+            print("No libusb driver found. Trying Telnet instead.")
+            try:
+                # vid 0846, netgear mr1100, mr5100
+                self.tn = Telnet("192.168.1.1", 5510)
+                self.connected = True
+            except:
+                self.connected = False
+                print("Failed to connect to Telnet.")
+                return
+            pass
         if mode in ["AT", "Unknown"]:
             for port in self.getserialports():
                 if port.vid in atvendortable:
@@ -168,8 +256,8 @@ class connection:
             data = ""
             while True:
                 tmp = self.tn.read_eager()
-                if tmp != b"":
-                    data += tmp.strip().decode('utf-8')
+                if tmp != "":
+                    data += tmp.strip()
                 else:
                     break
             if "ERROR" in data:
@@ -273,7 +361,7 @@ class adbtools(metaclass=LogBase):
             if cn.connected:
                 while True:
                     resp2 = cn.serial.read(8)
-                    if len(resp2)>0:
+                    if len(resp2) > 0:
                         break
                 cn.serial.write(mode)
                 response = cn.serial.read(8)
@@ -293,36 +381,34 @@ class adbtools(metaclass=LogBase):
             res = False
             if "vendor" in info:
                 if info["vendor"] == "Sierra Wireless" or info["vendor"] == "Netgear":
-                    res=self.SierraWireless(cn, info, enable)
+                    res = self.SierraWireless(cn, info, enable)
                 elif info["vendor"] == "Quectel":
                     print("Sending at switch command")
-                    res=self.Quectel(cn, enable)
+                    res = self.Quectel(cn, enable)
                 elif info["vendor"] == "ZTE":
                     print("Sending switch command via diag")
-                    res=self.ZTE(cn, enable)
+                    res = self.ZTE(cn, enable)
                 elif info["vendor"] == "Simcom":
-                    res=self.Simcom(cn)
+                    res = self.Simcom(cn, enable)
                 elif info["vendor"] == "Fibocom":
-                    res=self.Fibocom(cn, enable)
+                    res = self.Fibocom(cn, enable)
                 elif info["vendor"] == "Alcatel":
-                    res=self.Alcatel(enable)
+                    res = self.Alcatel(enable)
                 elif info["vendor"] == "Samsung":
-                    res=self.Samsung(cn, enable)
-            if enable:
-                mode="enabled"
-            else:
-                mode="disabled"
+                    res = self.Samsung(cn, enable)
+            mode = "enabled" if enable else "disabled"
             if res:
-                print("ADB successfully "+mode)
+                print("ADB successfully " + mode)
             else:
-                print("ADB couldn't be "+mode)
+                print("ADB couldn't be " + mode)
             cn.close()
         else:
             print("No device detected")
 
     def SierraWireless(self, cn, info, enable):
         print("Sending at switch command")
-        kg = SierraKeygen(cn)
+        kg = SierraKeygen(cn=cn, devicegeneration=None)
+        kg.detectdevicegeneration()
         if kg.openlock():
             if enable:
                 if cn.send('AT!CUSTOM="ADBENABLE",1\r') != -1:
@@ -330,7 +416,7 @@ class adbtools(metaclass=LogBase):
                 kg.openlock()
                 if cn.send('AT!CUSTOM="TELNETENABLE",1\r') != -1:
                     time.sleep(5)
-                    tn = Telnet("192.168.1.1", 23, 15)
+                    tn = Telnet("192.168.1.1", 23)
                     tn.write(b"adbd &\r\n")
                     info = tn.read_eager()
                     print(info)
@@ -342,25 +428,25 @@ class adbtools(metaclass=LogBase):
                             print("Successfully enabled PID 68E2")
                             return True
 
-            index=-1
-            type=-1
-            bitmask=-1
-            resp=cn.send("AT!USBCOMP?")
-            if resp!=-1:
+            index = -1
+            type = -1
+            bitmask = -1
+            resp = cn.send("AT!USBCOMP?")
+            if resp != -1:
                 print(resp)
                 for val in resp:
                     if "Config Index" in val:
-                        index=val[val.find("Config Index: ")+14:]
+                        index = val[val.find("Config Index: ") + 14:]
                     elif "Config Type" in val:
-                        type=val[val.find("Config Type: ")+14:].replace(" (Generic)","")
+                        type = val[val.find("Config Type: ") + 14:].replace(" (Generic)", "")
                     elif "Interface bitmask" in val:
-                        bitmask=val[val.find("Interface bitmask: ")+19:]
+                        bitmask = val[val.find("Interface bitmask: ") + 19:]
                         if " " in bitmask:
-                            bitmask="0x"+bitmask.split(" ")[0]
-                if index!=-1 and type!=-1 and bitmask!=1:
-                    index=int(index)
-                    type=int(type)
-                    bitmask=int(bitmask,16)
+                            bitmask = "0x" + bitmask.split(" ")[0]
+                if index != -1 and type != -1 and bitmask != 1:
+                    index = int(index)
+                    type = int(type)
+                    bitmask = int(bitmask, 16)
                     # AT!USBCOMP=<Config Index>,<Config Type>,<Interface bitmask>
                     #  <Config Index>      - configuration index to which the composition applies, should be 1
                     #  <Config Type>       - 1:Generic, 2:USBIF-MBIM, 3:RNDIS
@@ -379,13 +465,13 @@ class adbtools(metaclass=LogBase):
                     #                        ECM      - 0x00080000,
                     #                        UBIST    - 0x00200000
                     #if enable:
-                    cmd=f"AT!USBCOMP={index},{type},%08X" % 0x0080010E
+                    cmd = f"AT!USBCOMP={index},{type},%08X" % 0x0080010E
                     #else:
                     #    cmd = f"AT!USBCOMP={index},{type},%08X" % 0x0000010D
-                    resp=cn.send(cmd)
-                    if resp!=-1:
-                        resp=cn.send("AT!RESET")
-                        if resp!=-1:
+                    resp = cn.send(cmd)
+                    if resp != -1:
+                        resp = cn.send("AT!RESET")
+                        if resp != -1:
                             return True
                     return False
                 return True
@@ -470,12 +556,13 @@ class adbtools(metaclass=LogBase):
         return False
 
     def Quectel(self, cn, enable: bool = True):
-        salt = cn.send("AT+QADBKEY?\r")
-        if salt != -1:
-            if len(salt) > 1:
-                salt = salt[1]
-            code = crypt.crypt("SH_adb_quectel", "$1$" + salt)
-            code = code[12:]
+        sn = cn.send("AT+QADBKEY?\r")
+        if sn != -1:
+            if len(sn) > 1:
+                sn = sn[1]
+            cc = md5_crypt(salt="")
+            code = cc.encrypt("SH_adb_quectel", salt=str(sn))
+            code = code[12:28]
             cn.send("AT+QADBKEY=\"%s\"\r" % code)
         if enable:
             if cn.send("AT+QCFG=\"usbcfg\",0x2C7C,0x125,1,1,1,1,1,1,0\r") == -1:
@@ -491,7 +578,7 @@ class adbtools(metaclass=LogBase):
 
 def main():
     version = "1.2"
-    info = '\nModem Gimme-ADB ' + version + ' (c) B. Kerler 2020-2021\n-------------------------------------------\n'
+    info = '\nModem Gimme-ADB ' + version + ' (c) B. Kerler 2020-2023\n-------------------------------------------\n'
     parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, description=info)
     parser.add_argument(
         '-mode', help='Mode: enable or disable',
@@ -513,7 +600,7 @@ def main():
     else:
         enable = False
     ad.run(port=args.port, enable=enable)
-    #ad.meta(port=args.port)
+    # ad.meta(port=args.port)
 
 
 if __name__ == "__main__":

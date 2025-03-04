@@ -1,6 +1,10 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) B.Kerler 2018-2019
+# (c) B.Kerler 2018-2024 under GPLv3 license
+# If you use my code, make sure you refer to my name
+#
+# !!!!! If you use this code in commercial products, your product is automatically
+# GPLv3 and has to be open sourced under GPLv3 as well. !!!!!
 
 import os
 import sys
@@ -12,6 +16,7 @@ from edlclient.Library.firehose import firehose
 from edlclient.Library.xmlparser import xmlparser
 from edlclient.Library.utils import do_tcp_server
 from edlclient.Library.utils import LogBase, getint
+from edlclient.Library.gpt import AB_FLAG_OFFSET, AB_PARTITION_ATTR_SLOT_ACTIVE
 from edlclient.Config.qualcomm_config import memory_type
 from edlclient.Config.qualcomm_config import infotbl, msmids, secureboottbl, sochw
 import fnmatch
@@ -132,10 +137,11 @@ class firehose_client(metaclass=LogBase):
                 return True
         return False
 
-    def find_bootable_partition(self, rawprogram):
+    def find_bootable_partition(self, imagedir, rawprogram):
         part = -1
         for xml in rawprogram:
-            with open(xml, "r") as fl:
+            filename = os.path.join(imagedir, xml)
+            with open(filename, "r") as fl:
                 for evt, elem in ET.iterparse(fl, events=["end"]):
                     if elem.tag == "program":
                         label = elem.get("label")
@@ -201,13 +207,15 @@ class firehose_client(metaclass=LogBase):
                                                        int(options["--gpt-part-entry-start-lba"]))
                 if guid_gpt is None:
                     break
-                with open(sfilename, "wb") as write_handle:
-                    write_handle.write(data)
+                #with open(sfilename, "wb") as write_handle:
+                #    #write_handle.write(data)
+                #    pass
 
                 self.printer(f"Dumped GPT from Lun {str(lun)} to {sfilename}")
                 sfilename = os.path.join(directory, f"gpt_backup{str(lun)}.bin")
-                with open(sfilename, "wb") as write_handle:
-                    write_handle.write(data[self.firehose.cfg.SECTOR_SIZE_IN_BYTES * 2:])
+                #with open(sfilename, "wb") as write_handle:
+                #    #write_handle.write(data[self.firehose.cfg.SECTOR_SIZE_IN_BYTES * 2:])
+                #    pass
                 self.printer(f"Dumped Backup GPT from Lun {str(lun)} to {sfilename}")
                 if genxml:
                     guid_gpt.generate_rawprogram(lun, self.firehose.cfg.SECTOR_SIZE_IN_BYTES, directory)
@@ -343,7 +351,7 @@ class firehose_client(metaclass=LogBase):
                                                                start_sector=0, num_partition_sectors=1, display=False)
                         if self.get_storage_info():
                             totalsectors = (self.cfg.block_size *
-                                            self.cfg.total_blocks ) // self.cfg.SECTOR_SIZE_IN_BYTES
+                                            self.cfg.total_blocks) // self.cfg.SECTOR_SIZE_IN_BYTES
 
                             if len(luns) > 1:
                                 sfilename = filename + f".lun{str(lun)}"
@@ -479,21 +487,21 @@ class firehose_client(metaclass=LogBase):
                 pnames = ["userdata2", "metadata", "userdata", "reserved1", "reserved2", "reserved3"]
                 for pname in pnames:
                     for partition in guid_gpt.partentries:
-                        if partition.name != pname:
+                        if partition != pname:
                             continue
-                        self.printer(f"Detected partition: {partition.name}")
+                        self.printer(f"Detected partition: {partition}")
                         data = self.firehose.cmd_read_buffer(lun,
-                                                             partition.sector +
-                                                             (partition.sectors -
+                                                             guid_gpt.partentries[partition].sector +
+                                                             (guid_gpt.partentries[partition].sectors -
                                                               (0x4000 // self.firehose.cfg.SECTOR_SIZE_IN_BYTES)),
                                                              (0x4000 // self.firehose.cfg.SECTOR_SIZE_IN_BYTES), False)
                         if data == b"":
                             continue
-                        val = unpack("<I", data[:4])[0]
+                        val = unpack("<I", data.data[:4])[0]
                         if (val & 0xFFFFFFF0) == 0xD0B5B1C0:
                             with open(filename, "wb") as write_handle:
                                 write_handle.write(data)
-                                self.printer(f"Dumped footer from {partition.name} as {filename}.")
+                                self.printer(f"Dumped footer from {partition} as {filename}.")
                                 return True
             self.error("Error: Couldn't detect footer partition.")
             return False
@@ -617,9 +625,9 @@ class firehose_client(metaclass=LogBase):
                     return False
         elif cmd == "reset":
             mode = "reset"
-            if not self.check_param(["<resetmode>"]):
+            if not self.check_param(["--resetmode"]):
                 return False
-            return self.firehose.cmd_reset(options["<resetmode>"])
+            return self.firehose.cmd_reset(options["--resetmode"])
         elif cmd == "nop":
             if not self.check_cmd("nop"):
                 self.error("Nop command isn't supported by edl loader")
@@ -634,6 +642,31 @@ class firehose_client(metaclass=LogBase):
                 return False
             else:
                 return self.firehose.cmd_setbootablestoragedrive(int(options["<lun>"]))
+        elif cmd == "getactiveslot":
+            res = self.firehose.detect_partition(options, "boot_a", send_full=True)
+            if res[0]:
+                lun = res[1]
+                prim_guid_gpt = res[3]
+                _, backup_guid_gpt = self.firehose.get_gpt(lun, 0, 0, 0, prim_guid_gpt.header.backup_lba)
+                partition = backup_guid_gpt.partentries["boot_a"]
+                active = ((partition.flags >> (
+                            AB_FLAG_OFFSET * 8)) & 0xFF) & AB_PARTITION_ATTR_SLOT_ACTIVE == AB_PARTITION_ATTR_SLOT_ACTIVE
+                if active:
+                    self.printer("Current active slot: a")
+                    return True
+            res = self.firehose.detect_partition(options, "boot_b", send_full=True)
+            if res[0]:
+                lun = res[1]
+                prim_guid_gpt = res[3]
+                _, backup_guid_gpt = self.firehose.get_gpt(lun, 0, 0, 0, prim_guid_gpt.header.backup_lba)
+                partition = backup_guid_gpt.partentries["boot_b"]
+                active = ((partition.flags >> (
+                            AB_FLAG_OFFSET * 8)) & 0xFF) & AB_PARTITION_ATTR_SLOT_ACTIVE == AB_PARTITION_ATTR_SLOT_ACTIVE
+                if active:
+                    self.printer("Current active slot: b")
+                    return True
+            self.error("Can't detect active slot. Please make sure your device has slot A/B")
+            return False
         elif cmd == "setactiveslot":
             if not self.check_param(["<slot>"]):
                 return False
@@ -648,52 +681,66 @@ class firehose_client(metaclass=LogBase):
         elif cmd == "w":
             if not self.check_param(["<partitionname>", "<filename>"]):
                 return False
-            partitionname = options["<partitionname>"]
-            filename = options["<filename>"]
+            pname = options["<partitionname>"]
+            fname = options["<filename>"]
+            filenames = fname.split(",")
+            partitions = pname.split(",")
+            if len(partitions) != len(filenames):
+                self.error("You need to gives as many filenames as given partitions.")
+                return False
+            i = 0
             if options["--lun"] is not None:
                 lun = int(options["--lun"])
             else:
                 lun = 0
-            startsector = 0
-            if not os.path.exists(filename):
-                self.error(f"Error: Couldn't find file: {filename}")
-                return False
-            if partitionname.lower() == "gpt":
-                sectors = os.stat(filename).st_size // self.firehose.cfg.SECTOR_SIZE_IN_BYTES
-                res = [True, lun, sectors]
-            else:
-                res = self.firehose.detect_partition(options, partitionname)
-            if res[0]:
-                lun = res[1]
-                sectors = os.stat(filename).st_size // self.firehose.cfg.SECTOR_SIZE_IN_BYTES
-                if (os.stat(filename).st_size % self.firehose.cfg.SECTOR_SIZE_IN_BYTES) > 0:
-                    sectors += 1
-                if partitionname.lower() != "gpt":
-                    partition = res[2]
-                    if sectors > partition.sectors:
-                        self.error(
-                            f"Error: {filename} has {sectors} sectors but partition only has {partition.sectors}.")
-                        return False
-                    startsector = partition.sector
-                if self.firehose.modules is not None:
-                    self.firehose.modules.writeprepare()
-                if self.firehose.cmd_program(lun, startsector, filename):
-                    self.printer(f"Wrote {filename} to sector {str(startsector)}.")
-                    return True
+            bad = False
+            for partitionname in partitions:
+                startsector = 0
+                filename = filenames[i]
+                i += 1
+                if not os.path.exists(filename):
+                    self.error(f"Error: Couldn't find file: {filename}")
+                    bad = True
+                    continue
+                if partitionname.lower() == "gpt":
+                    sectors = os.stat(filename).st_size // self.firehose.cfg.SECTOR_SIZE_IN_BYTES
+                    res = [True, lun, sectors]
                 else:
-                    self.printer(f"Error writing {filename} to sector {str(startsector)}.")
-                    return False
+                    res = self.firehose.detect_partition(options, partitionname)
+                if res[0]:
+                    lun = res[1]
+                    sectors = os.stat(filename).st_size // self.firehose.cfg.SECTOR_SIZE_IN_BYTES
+                    if (os.stat(filename).st_size % self.firehose.cfg.SECTOR_SIZE_IN_BYTES) > 0:
+                        sectors += 1
+                    if partitionname.lower() != "gpt":
+                        partition = res[2]
+                        if sectors > partition.sectors:
+                            self.error(
+                                f"Error: {filename} has {sectors} sectors but partition only has {partition.sectors}.")
+                            bad = True
+                            continue
+                        startsector = partition.sector
+                    if self.firehose.modules is not None:
+                        self.firehose.modules.writeprepare()
+                    if self.firehose.cmd_program(lun, startsector, filename):
+                        self.printer(f"Wrote {filename} to sector {str(startsector)}.")
+                    else:
+                        self.printer(f"Error writing {filename} to sector {str(startsector)}.")
+                        bad = True
+                else:
+                    if len(res) > 0:
+                        fpartitions = res[1]
+                        self.error(f"Error: Couldn't detect partition: {partitionname}\nAvailable partitions:")
+                        for lun in fpartitions:
+                            for partition in fpartitions[lun]:
+                                if self.cfg.MemoryName == "emmc":
+                                    self.error("\t" + partition)
+                                else:
+                                    self.error(lun + ":\t" + partition)
+            if bad:
+                return False
             else:
-                if len(res) > 0:
-                    fpartitions = res[1]
-                    self.error(f"Error: Couldn't detect partition: {partitionname}\nAvailable partitions:")
-                    for lun in fpartitions:
-                        for partition in fpartitions[lun]:
-                            if self.cfg.MemoryName == "emmc":
-                                self.error("\t" + partition.name)
-                            else:
-                                self.error(lun + ":\t" + partition.name)
-            return False
+                return True
         elif cmd == "wl":
             if not self.check_param(["<directory>"]):
                 return False
@@ -710,17 +757,18 @@ class firehose_client(metaclass=LogBase):
             filenames = []
             if self.firehose.modules is not None:
                 self.firehose.modules.writeprepare()
-            for dirName, subdirList, fileList in os.walk(directory):
-                for fname in fileList:
-                    filenames.append(os.path.join(dirName, fname))
+            for fname in filter(os.path.isfile, [os.path.join(directory, i) for i in os.listdir(directory)]):
+                filenames.append(fname)
             for lun in luns:
                 data, guid_gpt = self.firehose.get_gpt(lun, int(options["--gpt-num-part-entries"]),
                                                        int(options["--gpt-part-entry-size"]),
                                                        int(options["--gpt-part-entry-start-lba"]))
                 if guid_gpt is None:
+                    self.error(
+                        "Error: Can not fetch GPT table from device, you may need to use `edl w gpt` to write a partition table first.`")
                     break
                 for filename in filenames:
-                    partname = filename[filename.rfind("/") + 1:]
+                    partname = os.path.basename(filename)
                     if ".bin" in partname[-4:] or ".img" in partname[-4:] or ".mbn" in partname[-4:]:
                         partname = partname[:-4]
                     if partname in skip:
@@ -736,9 +784,12 @@ class firehose_client(metaclass=LogBase):
                             return False
                         self.printer(f"Writing {filename} to partition {str(partition.name)}.")
                         self.firehose.cmd_program(lun, partition.sector, filename)
-                else:
-                    self.printer("Couldn't write partition. Either wrong memorytype given or no gpt partition.")
-                    return False
+                    else:
+                        if partname[0:3] == "gpt" or partname[-3:] == "xml":
+                            self.printer(f"Can't find a partition named {partname} in the gpt, but continuing anyway.")
+                            continue
+                        self.error(f"Couldn't write partition {partname}. Either wrong memorytype given or no gpt partition.")
+                        return False
             return True
         elif cmd == "ws":
             if not self.check_param(["<start_sector>"]):
@@ -785,6 +836,7 @@ class firehose_client(metaclass=LogBase):
                 return False
             luns = self.getluns(options)
             partitionname = options["<partitionname>"]
+            partitions = partitionname.split(",")
             for lun in luns:
                 data, guid_gpt = self.firehose.get_gpt(lun, int(options["--gpt-num-part-entries"]),
                                                        int(options["--gpt-part-entry-size"]),
@@ -793,19 +845,16 @@ class firehose_client(metaclass=LogBase):
                     break
                 if self.firehose.modules is not None:
                     self.firehose.modules.writeprepare()
-
-                if partitionname in guid_gpt.partentries:
-                    partition = guid_gpt.partentries[partitionname]
-                    self.firehose.cmd_erase(lun, partition.sector, partition.sectors)
-                    self.printer(
-                        f"Erased {partitionname} starting at sector {str(partition.sector)} " +
-                        f"with sector count {str(partition.sectors)}.")
-                    return True
-                else:
-                    self.printer(
-                        f"Couldn't erase partition {partitionname}. Either wrong memorytype given or no gpt partition.")
-                    return False
-            self.error(f"Error: Couldn't detect partition: {partitionname}")
+                for partitionname in partitions:
+                    if partitionname in guid_gpt.partentries:
+                        partition = guid_gpt.partentries[partitionname]
+                        self.firehose.cmd_erase(lun, partition.sector, partition.sectors)
+                        self.printer(
+                            f"Erased {partitionname} starting at sector {str(partition.sector)} " +
+                            f"with sector count {str(partition.sectors)}.")
+                        return True
+            self.error(
+                f"Couldn't erase partition {partitionname}. Either wrong memorytype given or no gpt partition.")
             return False
         elif cmd == "ep":
             if not self.check_param(["<partitionname>", "<sectors>"]):
@@ -936,7 +985,8 @@ class firehose_client(metaclass=LogBase):
                 else:
                     self.warning(f"File : {filename} not found.")
             self.info("[qfil] patching ok")
-            bootable = self.find_bootable_partition(rawprogram)
+
+            bootable = self.find_bootable_partition(imagedir, rawprogram)
             if bootable != -1:
                 if self.firehose.cmd_setbootablestoragedrive(bootable):
                     self.info("[qfil] partition({partition}) is now bootable\n".format(partition=bootable))
